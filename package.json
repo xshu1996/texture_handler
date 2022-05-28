@@ -1,0 +1,11 @@
+{
+  "name": "texture_handler",
+  "version": "1.0.0",
+  "description": "empty",
+  "main": "src/main.js",
+  "author": "xshu",
+  "license": "ISC",
+  "dependencies": {
+    "pngjs": "^6.0.0"
+  }
+}
