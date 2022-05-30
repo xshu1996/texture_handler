@@ -1,11 +1,30 @@
 {
   "name": "texture_handler",
   "version": "1.0.0",
-  "description": "empty",
+  "description": "Cocos Creator 处理图片黑边以及使用 TinyPng 压缩图片的脚本工具",
   "main": "src/main.js",
+  "scripts": {
+    "dev": "node src/main.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "author": "xshu",
   "license": "ISC",
   "dependencies": {
-    "pngjs": "^6.0.0"
+    "pngjs": "^6.0.0",
+    "tinify": "^1.6.1"
+  },
+  "bin": "src/main.js",
+  "pkg": {
+    "scripts": [
+      "src/main.js"
+    ],
+    "targets": [
+      "node14-macos-x64",
+      "node14-win-x64"
+    ],
+    "assets": [
+      "node_modules/**/*"
+    ],
+    "outputPath": "./build"
   }
 }

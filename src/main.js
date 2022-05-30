@@ -1,14 +1,21 @@
 const path = require("path");
 const fs = require("fs");
 const stream = require("stream");
-// npm install pngjs -g
+// npm install pngjs -save
 const pngjs = require("pngjs");
+// npm install tinify --save
+const tinify = require("tinify");
+const process = require("process");
 
 let fileMap = Object.create(null);
-let ImageCount = 0;
+let failedMap = Object.create(null);
+let imageSumCount = 0;
 let handleImageCount = 0;
 let handleSuccessImageCount = 0;
+let compressSumCount = 0;
+let compressSuccessCount = 0;
 
+const user_config = getHandleConfig();
 
 function getInput(tips = "")
 {
@@ -24,6 +31,38 @@ function getInput(tips = "")
             return res(filePath);
         });
     });
+}
+
+function getHandleConfig()
+{
+    let config = null;
+    try
+    {
+        // console.log("process.argv0 : ", process.argv0);
+        // nodejs or app-x64
+        let url = process.argv0.indexOf("node") !== -1 ?
+            path.resolve(__dirname, "../build/user_handle_config.json") :
+            path.resolve(process.argv0, "../user_handle_config.json");
+        const data = fs.readFileSync(url, "utf-8");
+        config = JSON.parse(data);
+        console.log("********** User Config *********");
+        console.table(config);
+    }
+    catch (err)
+    {
+        console.error("##### load user config error: ", err);
+        return null;
+    }
+
+    if (config && 
+        config.compressByTinify && 
+        (!config.tinify_token || config.tinify_token.length <= 0)) 
+    {
+        console.log("Tinify token is null");
+        return null;
+    }
+
+    return config;
 }
 
 function printFileTree(fileRoot, deep = 1)
@@ -42,10 +81,6 @@ function printFileTree(fileRoot, deep = 1)
         let state = fs.statSync(path.join(fileRoot, dirInfo[i]));
         if (state.isFile())
         {
-            // if (dirInfo[i].includes("dilate"))
-            // {
-            //     fs.rmSync(path.join(fileRoot, dirInfo[i]));
-            // }
             files.push(dirInfo[i]);
         } else
         {
@@ -79,6 +114,12 @@ function visitFiles(filePath, handler)
             const fileStat = fs.statSync(filePath);
             if (fileStat.isDirectory())
             {
+                let fileName = path.basename(filePath);
+                // skip the folder named backup
+                if (fileName == "Backups" || fileName == "Outputs")
+                {
+                    return res(1);
+                }
                 let files = fs.readdirSync(filePath);
                 for (let i = 0; i < files.length; ++i)
                 {
@@ -97,21 +138,23 @@ function visitFiles(filePath, handler)
                 }
                 else
                 {
-                    return rej(`${ filePath } is an invalid image`);
+                    return res(`${filePath} is an invalid image`);
                 }
             }
         }
         catch (err)
         {
             console.error("check file stat failed: ", err);
-            return rej(err);
+            return res(err);
         }
     });
 }
 
 function _formatSize(size) 
 {
-    return `${size > 1024 ? (size / 1024).toFixed(2) + "KB" : size + "B"}`;
+    let sign = Math.sign(size);
+    size = Math.abs(size);
+    return `${size > 1024 ? sign * (size / 1024).toFixed(2) + "KB" : sign * size + "B"}`;
 }
 
 function isValidImgFormat(extName) 
@@ -126,33 +169,73 @@ function handleImage(filePath, stat)
         fileMap[filePath] = {
             originalSize: stat.size,
         };
+        let fileName = path.basename(filePath, ".png");
+        let prefix = path.dirname(filePath);
+
         let errMsg = "";
         let data = fs.readFileSync(filePath);
+        let newData = null;
         if (path.extname(filePath) === ".png")
         {
             ++handleImageCount;
-            const d = await getBufferAfterDilate(data);
-            if (d)
+            newData = await getBufferAfterDilate(data);
+            if (newData)
             {
                 ++handleSuccessImageCount;
-                data = d;
+                let beforeSize = Buffer.byteLength(data, "binary");
+                let afterSize = Buffer.byteLength(newData, "binary");
+                fileMap[filePath].afterHandleSize = afterSize;
+                console.log(`$$$$ Dilate: <${filePath}> beforeSize -> ${_formatSize(beforeSize)}, afterSize -> ${_formatSize(afterSize)}, ratio -> ${((beforeSize - afterSize) / beforeSize * 100).toFixed(2)}%`);
             }
             else
             {
                 errMsg = "dilate png failed, file path is " + filePath;
+                failedMap[filePath] = errMsg;
+                return res(errMsg);
             }
         }
-        let fileName = path.basename(filePath, ".png");
-        let prefix = path.dirname(filePath);
-        let newPath = path.join(prefix, fileName + "_dilate.png");
-        fs.writeFileSync(newPath, data);
-        const afterStat = fs.statSync(newPath);
-        fileMap[filePath].afterHandleSize = afterStat.size;
-        let sizeDelta = fileMap[filePath].afterHandleSize - fileMap[filePath].originalSize;
 
-        console.log(`${filePath} after dilate, original size: ${fileMap[filePath].originalSize}, after handle size: ${fileMap[filePath].afterHandleSize}, size change: ${_formatSize(sizeDelta)}`);
+        if (user_config && user_config.compressByTinify)
+        {
+            ++compressSumCount;
+            newData = await compressImage(newData);
+            if (!newData)
+            {
+                errMsg = "compress image error";
+                failedMap[filePath] = errMsg;
+                return res(errMsg);
+            }
+            let beforeSize = Buffer.byteLength(data, "binary");
+            let afterSize = Buffer.byteLength(newData, "binary");
+            fileMap[filePath].afterHandleSize = afterSize;
+            ++compressSuccessCount;
+            console.log(`%%%% Compress: <${filePath}> beforeSize -> ${_formatSize(beforeSize)}, afterSize -> ${_formatSize(afterSize)}, ratio -> ${((beforeSize - afterSize) / beforeSize * 100).toFixed(2)}%`);
+        }
 
-        return res(errMsg);
+        if (user_config && user_config.isOverlay)
+        {
+            let dirPath = path.join(prefix, "Backups");
+            let hasDir = await isFileExisted(dirPath);
+            if (!hasDir || !fs.statSync(dirPath).isDirectory())
+            {
+                fs.mkdirSync(dirPath);
+            }
+            fs.renameSync(filePath, path.join(dirPath, fileName + ".png"));
+            fs.writeFileSync(filePath, newData);
+        }
+        else 
+        {
+            let dirPath = path.join(prefix, "Outputs");
+            let hasDir = await isFileExisted(dirPath);
+            if (!hasDir || !fs.statSync(dirPath).isDirectory())
+            {
+                fs.mkdirSync(dirPath);
+            }
+            filePath = path.join(dirPath, fileName + ".png");
+            fs.writeFileSync(filePath, newData);
+        }
+
+        return res(1);
     });
 }
 
@@ -245,7 +328,7 @@ function getPng(data)
             .on("error", function (err)
             {
                 console.log("parsed png error", err);
-                rej(null);
+                res(null);
             });
     });
 }
@@ -265,7 +348,7 @@ function generalPng(data)
         png.on("error", (err) =>
         {
             console.error("png package error", err);
-            return rej(err);
+            return res(err);
         });
         png.on("end", () =>
         {
@@ -275,30 +358,127 @@ function generalPng(data)
     });
 }
 
-function reset()
+function compressImage(buffer)
 {
-    lfileMap = Object.create(null);
-    ImageCount = 0;
-    handleImageCount = 0;
-    handleSuccessImageCount = 0;
+    return new Promise((resolve, reject) => 
+    {
+        if (!user_config || !user_config.compressByTinify)
+        {
+            return resolve(buffer);
+        }
+        tinify.key = user_config === null || user_config === 0 ? 0 : user_config.tinify_token;
+        tinify
+            .fromBuffer(buffer)
+            .toBuffer()
+            .then((data) => 
+            {
+                resolve(Buffer.from(data));
+            })
+            .catch((e) => 
+            {
+                let errMsg = '';
+                if (e instanceof tinify.AccountError)
+                {
+                    errMsg = "There is a problem with your API key or API account.  Your request could not be authenticated.  After verifying the API key and account status, you can retry the request.";
+                }
+                else if (e instanceof tinify.ClientError)
+                {
+                    errMsg = "The request could not be completed because of a problem with the submitted data.  The exception message will contain more information.  You should not retry the request.";
+                }
+                else if (e instanceof tinify.ServerError)
+                {
+                    errMsg = "The request could not be completed due to a temporary issue with the Tinify API.  It is safe to retry the request a few minutes later.  ";
+                }
+                else if (e instanceof tinify.ConnectionError)
+                {
+                    errMsg = "The request could not be sent to the Tinify API due to connection problems.  You should check the network connection.  It is safe to retry the request.";
+                }
+                console.log(`Compress image error, see the error info: ${errMsg}`);
+                reject(null);
+            });
+    });
 }
 
-async function main()
+function reset()
 {
-    let filePath = await getInput("请输入文件路径或文件夹根目录（支持拖入）:");
-    if (!filePath)
+    fileMap = Object.create(null);
+    failedMap = Object.create(null);
+    handleImageCount = 0;
+    handleSuccessImageCount = 0;
+    compressSumCount = 0;
+    compressSuccessCount = 0;
+}
+
+function main()
+{
+    return new Promise(async (res, rej) =>
     {
-        console.log("输入的路径不能为空");
-        return main();
-    }
-    console.log(`==== 输入的路径为: ${filePath} =====`);
-    // console.log("/**************** File Tree Begin *********************/");
-    // printFileTree(filePath);
-    // console.log("/**************** File Tree End ***********************/");
-    await visitFiles(filePath, handleImage);
-    console.log(`/************************ completed: ${handleSuccessImageCount} *******************************/`);
-    console.log("\n\n\n");
-    main();
+        console.time("本次操作耗时：");
+        reset();
+        let filePath = await getInput("请输入文件路径或文件夹根目录（支持拖入）:");
+        if (!filePath)
+        {
+            console.log("输入的路径不能为空");
+            return main();
+        }
+        console.log(`==== 输入的路径为: <${filePath}>`);
+    
+        if (user_config && user_config.output_file_tree)
+        {
+            console.log("/**************** File Tree Begin *********************/");
+            printFileTree(filePath);
+            console.log("/**************** File Tree End ***********************/");
+        }
+    
+        await visitFiles(filePath, handleImage);
+        console.log(`/************************ completed: ${handleSuccessImageCount} *******************************/`);
+    
+        if (Object.keys(failedMap).length > 0)
+        {
+            console.log("********************** Failed Map Start ********************");
+            console.table(failedMap);
+            console.log("********************** Failed Map End ********************");
+        }
+    
+        console.log("\n\n\n");
+    
+        console.table({
+            compressSumCount,
+            compressSuccessCount,
+            handleImageCount,
+            handleSuccessImageCount,
+        });
+    
+        console.timeEnd("本次操作耗时：");
+    
+        main();
+        return res(1);
+    });
 }
 
 main();
+
+
+/**************** tool function ************/
+
+/**
+ * 判断文件是否存在
+ * @param {string} path_way 
+ */
+function isFileExisted(path_way)
+{
+    return new Promise((resolve, reject) =>
+    {
+        fs.access(path_way, (err) =>
+        {
+            if (err)
+            {
+                resolve(false);
+            }
+            else
+            {
+                resolve(true);
+            }
+        });
+    });
+};
