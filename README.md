@@ -41,5 +41,5 @@ Cocos Creator 引擎默认对纹理进行双线性插值采样(Filter Mode = Bil
 
 ## 工具由 nodejs + pkg，支持平台:
 
-- [Win]()
-- [MacOS]()
+- [Win](https://gitee.com/xshu1996/texture_handler/attach_files/1078946/download/win-x64-v1.0.0.zip)
+- [MacOS](https://gitee.com/xshu1996/texture_handler/attach_files/1078949/download/macos-v1.0.0.zip)
